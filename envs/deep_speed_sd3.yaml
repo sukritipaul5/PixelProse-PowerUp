@@ -1,0 +1,13 @@
+compute_environment: LOCAL_MACHINE
+deepspeed_config:
+  gradient_accumulation_steps: 1
+  gradient_clipping: 1.0
+  zero_stage: 2
+distributed_type: DEEPSPEED
+machine_rank: 0  # This will be set dynamically in the PBS script
+main_training_function: main
+mixed_precision: fp16
+num_machines: 1
+num_processes: 4
+same_network: true
+use_cpu: false
