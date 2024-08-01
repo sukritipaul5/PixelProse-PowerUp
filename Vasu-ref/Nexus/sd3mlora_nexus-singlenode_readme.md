@@ -1,8 +1,9 @@
-# Nexus single-node setup for SD3M-LoRA Fine-tune (Single Node; Test Run)
+# Nexus single-node setup for SD3M-LoRA Fine-tune 
+### Single Node (Test Run)
 
-1. Main train script: temp_sd3.py
-2. Accelerate config: deep_speed_sd3.yaml
-3. Environment config: env.yaml
+1. Main train script: `temp_sd3.py`
+2. Accelerate config: `deep_speed_sd3.yaml`
+3. Environment path: `/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/env/sd3-medium-lora`
 
 
 ### Interative Command
@@ -10,8 +11,9 @@ Interactive run: `srun --pty --gres=gpu:rtxa6000:1 --cpus-per-task=4 --mem=128G 
 
 
 ### Launch Specs (for Interactive)
-$module load cuda/12.1.1
-$conda activate /fs/cml-projects/yet-another-diffusion/sd3m-diffusion/env/sd3-medium-lora
+```
+module load cuda/12.1.1
+conda activate /fs/cml-projects/yet-another-diffusion/sd3m-diffusion/env/sd3-medium-lora
 
 export MODEL_NAME="stabilityai/stable-diffusion-3-medium-diffusers"
 export OUTPUT_DIR="/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/outputs/run04-sd3-lora"
@@ -48,6 +50,7 @@ accelerate launch temp_sd3.py \
   --max_sequence_length=77 \
   --max_train_steps=100 \
   --num_samples=5000
+```
 
 ### Data subset used for Test Run
 1. Test subset: 5k samples from `/fs/cml-projects/yet-another-diffusion/pixelprose-shards/commonpool_node0_part1/`
