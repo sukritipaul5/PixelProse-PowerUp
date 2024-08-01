@@ -53,5 +53,5 @@ accelerate launch temp_sd3.py \
 ```
 
 ### Data subset used for Test Run
-1. Test subset: 5k samples from `/fs/cml-projects/yet-another-diffusion/pixelprose-shards/commonpool_node0_part1/`
+1. Test subset: 5k samples from `/fs/cml-projects/yet-another-diffusion/pixelprose-shards/commonpool_node0_part1/commonpool_node0_part1_0000000.tar`
 2. Throughput : 3.49
