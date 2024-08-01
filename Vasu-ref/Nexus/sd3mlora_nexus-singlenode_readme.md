@@ -6,7 +6,7 @@
 3. Environment path: `/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/env/sd3-medium-lora`
 
 
-### Interative Command
+### Interactive Command
 Interactive run: `srun --pty --gres=gpu:rtxa6000:1 --cpus-per-task=4 --mem=128G --qos=scavenger --account=scavenger --partition=scavenger --time=1:00:00 /bin/bash`
 
 
