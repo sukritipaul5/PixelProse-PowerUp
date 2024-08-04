@@ -1,7 +1,7 @@
 # Evaluation Strategy 
 
 ### Background & Goals
-We have identified failure modes in SDXL, SD3M, and PixArt Sigma. Building on this, via a qualitative analysis, we will understand how our diffusion model mitigates some of these failures (and present persistent issues if any.) A subset of high-quality prompts will serve as an internal benchmark of sorts for rapid testing.  
+We have identified failure modes in SDXL, SD3M, and PixArt Sigma. Building on this (via a qualitative analysis), we will understand how our diffusion model mitigates some of these failures (and present persistent issues if any.) A subset of high-quality prompts will serve as an internal benchmark of sorts for rapid testing.  
 
 Image generation is usually evaluated for image quality and image-text alignment. With this in mind, we will set up specific evaluations while concurrently fine-tuning the diffusion model. This will help us to understand what to look for while conducting ablation studies on model design parameters.
 
