@@ -7,7 +7,7 @@ import torch
 
 class WebDatasetAdapter(IterableDataset):
     def __init__(self, tar_path, tokenizers, size=1024, center_crop=False, random_flip=False, max_length=77, num_samples=None):
-        self.dataset = wds.WebDataset(tar_path).shuffle(1000)
+        self.dataset = wds.WebDataset(tar_path, nodesplitter=wds.split_by_node).shuffle(1000)
         self.tokenizers = tokenizers
         self.image_size = size
         self.center_crop = center_crop

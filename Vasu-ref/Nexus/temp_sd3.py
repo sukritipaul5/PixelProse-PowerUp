@@ -16,6 +16,7 @@ from contextlib import nullcontext
 from pathlib import Path
 import ipdb
 import time
+import datetime
 
 import numpy as np
 import torch
@@ -38,6 +39,7 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 from transformers import CLIPTokenizer, PretrainedConfig, T5TokenizerFast
+import webdataset as wds
 
 import diffusers
 from diffusers import (
@@ -606,7 +608,15 @@ def parse_args(input_args=None):
 
 
 def main(args):
-
+    os.makedirs(args.output_dir, exist_ok=True)
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+        handlers=[logging.FileHandler(
+            os.path.join(args.output_dir, "log.txt"), mode="a"
+        )]
+    )
     logging.info("Starting main function")
     logging.info("Initializing accelerator")
 
@@ -674,11 +684,6 @@ def main(args):
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
 
     # Make one log on every process with the configuration for debugging.
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         transformers.utils.logging.set_verbosity_warning()
@@ -927,7 +932,7 @@ def main(args):
     
     #samples: 13264
     train_dataset = WebDatasetAdapter(
-    tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/commonpool_node0_part1/commonpool_node0_part1_0000000.tar",
+    tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/commonpool_node0_part1/commonpool_node0_part1_{0000000..0000049}.tar",
     tokenizers=tokenizers,
     size=args.resolution,
     center_crop=args.center_crop,
@@ -935,7 +940,6 @@ def main(args):
     max_length=args.max_sequence_length,
     num_samples=args.num_samples
     )
-
 
     logging.info(f"Number of samples to process: {args.num_samples}")
     #print(f"Dataset size on rank {dist.get_rank()}: {len(train_dataset)}")
