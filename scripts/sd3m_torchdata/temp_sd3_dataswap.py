@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Modified to SD3-M-LoRA FT via Tom's Lab.
 
 import argparse
 import copy
@@ -17,7 +18,6 @@ from pathlib import Path
 import ipdb
 import time
 import datetime
-
 import numpy as np
 import torch
 import torch.utils.checkpoint
@@ -36,11 +36,12 @@ from PIL import Image,ImageOps
 from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torch.distributed as dist
+
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 from transformers import CLIPTokenizer, PretrainedConfig, T5TokenizerFast
 import webdataset as wds
-
 import diffusers
 from diffusers import (
     AutoencoderKL,
@@ -62,73 +63,77 @@ from diffusers.utils import (
 )
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.torch_utils import is_compiled_module
-
 from PIL import Image
 import io
 import prodigyopt
 import deepspeed
 import safetensors.torch
 import os
-
 import utils_sd3
 from data_sd3 import StatefulWebDataset, create_dataloader
+import wandb
 
 
-
-if is_wandb_available():
-    import wandb
+# if is_wandb_available():
+#     import wandb
 
 # Will error if the minimal version of diffusers is not installed. 
 check_min_version("0.30.0.dev0")
 
 
 logger = get_logger(__name__)
-
-os.environ['WANDB_MODE'] = 'offline'
+os.environ['WANDB_MODE'] = 'online'
 os.environ['LD_LIBRARY_PATH'] = '/soft/compilers/cudatoolkit/cuda-12.2.2/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
 os.environ['CUDA_HOME'] = '/soft/compilers/cudatoolkit/cuda-12.2.2'
 
-def log_validation(
-    pipeline,
-    args,
-    accelerator,
-    pipeline_args,
-    epoch,
-    is_final_validation=False,
-):
-    logger.info(
-        f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-        f" {args.validation_prompt}."
-    )
-    pipeline = pipeline.to(accelerator.device)
-    pipeline.set_progress_bar_config(disable=True)
 
-    # run inference
-    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-    autocast_ctx = nullcontext()
 
-    with autocast_ctx:
-        images = [pipeline(**pipeline_args, generator=generator).images[0] for _ in range(args.num_validation_images)]
+# def log_validation(
+#     pipeline,
+#     args,
+#     accelerator,
+#     epoch,
+#     is_final_validation=False,
+# ):
+#     logger.info(
+#         f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+#         f" {args.validation_prompt}."
+#     )
+#     pipeline = pipeline.to(accelerator.device)
+#     pipeline.set_progress_bar_config(disable=True)
 
-    for tracker in accelerator.trackers:
-        phase_name = "test" if is_final_validation else "validation"
-        if tracker.name == "tensorboard":
-            np_images = np.stack([np.asarray(img) for img in images])
-            tracker.writer.add_images(phase_name, np_images, epoch, dataformats="NHWC")
-        if tracker.name == "wandb":
-            tracker.log(
-                {
-                    phase_name: [
-                        wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)
-                    ]
-                }
-            )
+#     # run inference
+#     generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
+    
+#     images = []
+#     with torch.autocast("cuda"):
+#         for _ in range(args.num_validation_images):
+#             image = pipeline(
+#                 args.validation_prompt, 
+#                 num_inference_steps=30, 
+#                 generator=generator
+#             ).images[0]
+#             images.append(image)
 
-    del pipeline
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+#     for tracker in accelerator.trackers:
+#         phase_name = "test" if is_final_validation else "validation"
+#         if tracker.name == "tensorboard":
+#             np_images = np.stack([np.asarray(img) for img in images])
+#             tracker.writer.add_images(phase_name, np_images, epoch, dataformats="NHWC")
+#         if tracker.name == "wandb":
+#             tracker.log(
+#                 {
+#                     phase_name: [
+#                         wandb.Image(image, caption=f"{i}: {args.validation_prompt}") 
+#                         for i, image in enumerate(images)
+#                     ]
+#                 }
+#             )
 
-    return images
+#     del pipeline
+#     torch.cuda.empty_cache()
+
+#     return images
 
 
 def import_model_class_from_model_name_or_path(
@@ -172,16 +177,7 @@ def parse_args(input_args=None):
         default=None,
         help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
     )
-    parser.add_argument(
-        "--dataset_name",
-        type=str,
-        default="lambdalabs/naruto-blip-captions",
-        help=(
-            "The name of the Dataset (from the HuggingFace hub) containing the training data of instance images (could be your own, possibly private,"
-            " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
-            " or to a folder containing files that 🤗 Datasets can understand."
-        ),
-    )
+
     parser.add_argument(
         "--dataset_config_name",
         type=str,
@@ -260,6 +256,15 @@ def parse_args(input_args=None):
             " `args.validation_prompt` multiple times: `args.num_validation_images`."
         ),
     )
+
+    parser.add_argument(
+        "--validation_step",
+        type=int,
+        default=500,
+        help=("Use iters instead" ),
+    )
+
+
     parser.add_argument(
         "--rank",
         type=int,
@@ -511,7 +516,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--report_to",
         type=str,
-        default="tensorboard",
+        default="wandb",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
@@ -558,8 +563,8 @@ def parse_args(input_args=None):
     else:
         args = parser.parse_args()
     
-    if args.dataset_name != "lambdalabs/naruto-blip-captions":
-        raise ValueError("This script is configured to use the lambdalabs/naruto-blip-captions dataset.")
+    # if args.dataset_name != "lambdalabs/naruto-blip-captions":
+    #     raise ValueError("This script is configured to use the lambdalabs/naruto-blip-captions dataset.")
 
     
 
@@ -580,6 +585,8 @@ def parse_args(input_args=None):
 
 
 def main(args):
+
+
     os.makedirs(args.output_dir, exist_ok=True)
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -591,6 +598,22 @@ def main(args):
     )
     logging.info("Starting main function")
     logging.info("Initializing accelerator")
+
+    # if int(os.environ.get("LOCAL_RANK", -1)) == 0:
+    #     args.report_to = "wandb"
+    # else:
+    #     args.report_to = None
+
+    if dist.is_available() and dist.is_initialized():
+        # In distributed setting, only report on rank 0
+        if dist.get_rank() == 0:
+            args.report_to = "wandb"
+        else:
+            args.report_to = None
+    else:
+        # In non-distributed setting (including single GPU), always report
+        args.report_to = "wandb"
+
 
     accelerator_project_config = ProjectConfiguration(
         project_dir=args.output_dir,
@@ -606,6 +629,12 @@ def main(args):
         project_config=accelerator_project_config,
         kwargs_handlers=[kwargs],
     )
+
+
+    #Wandb online logging
+    if accelerator.is_main_process:
+        import wandb
+        wandb.init(project="sd3medium-lora-finetune", config=args)
 
     logger.info(f"Distributed environment: {accelerator.distributed_type}")
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
@@ -1101,6 +1130,7 @@ def main(args):
 
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
+        
                 
         for step, batch in enumerate(train_dataloader):
             if batch is None:
@@ -1229,6 +1259,24 @@ def main(args):
                         dataset_state = train_dataset.state_dict() if hasattr(train_dataset, 'state_dict') else {}
                         torch.save(dataset_state, os.path.join(save_path, "dataset_state.pt"))
 
+
+            if accelerator.is_main_process:
+                # condition = (args.validation_prompt is not None and \
+                #     ((epoch % args.validation_epochs == 0) or (global_step % args.validation_step)) 
+                # )
+
+                condition = (args.validation_prompt is not None and (global_step % args.validation_step==0))
+                if condition:
+                    print(global_step,args.validation_step)
+                    logger.info(f"Running validation... \nEpoch: {epoch}, Global Step: {global_step}")
+                    logger.info(f"Starting validation at step {global_step}")
+
+                    text_encoders = text_encoder_one,text_encoder_two,text_encoder_three
+                    utils_sd3.validate_log(args,accelerator,vae,text_encoders,\
+                        transformer,global_step,weight_dtype,logger=logger)
+
+
+            
             logs = {
                 "loss": loss.detach().item(), 
                 "lr": lr_scheduler.get_last_lr()[0], 
@@ -1237,63 +1285,23 @@ def main(args):
                 "elapsed_time": elapsed_time,
                 "step": global_step,}
 
+            if accelerator.is_main_process:
+                wandb.log(logs, step=global_step)
+
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             #added    
             if global_step >= args.max_train_steps:
                 break          
-            
-        if global_step >= args.max_train_steps:
-            break
 
-        if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                logger.info(f"Starting validation at step {global_step}")
-                utils_sd3.log_memory_usage()
-                # create pipeline
-                text_encoder_one, text_encoder_two, text_encoder_three = utils_sd3.load_text_encoders(args,
-                    text_encoder_cls_one, text_encoder_cls_two, text_encoder_cls_three
-                )
-                logger.info("Text encoders loaded")
-                print("Text encoders loaded")
-                utils_sd3.log_memory_usage()
-               
-                pipeline = StableDiffusion3Pipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=vae,
-                    text_encoder=accelerator.unwrap_model(text_encoder_one),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    text_encoder_3=accelerator.unwrap_model(text_encoder_three),
-                    transformer=accelerator.unwrap_model(transformer),
-                    revision=args.revision,
-                    variant=args.variant,
-                    torch_dtype=weight_dtype,
-                )
-                print("Pipeline created")                   
-                logger.info("Pipeline created")
-                utils_sd3.log_memory_usage()
-                
-                pipeline_args = {"prompt": args.validation_prompt}
-                images = log_validation(
-                    pipeline=pipeline,
-                    args=args,
-                    accelerator=accelerator,
-                    pipeline_args=pipeline_args,
-                    epoch=epoch,
-                )
-                
-                logger.info("Validation completed")
-                utils_sd3.log_memory_usage()
-                del text_encoder_one, text_encoder_two, text_encoder_three
-                torch.cuda.empty_cache()
-                gc.collect()
-                logger.info("Cleaned up after validation")
-                utils_sd3.log_memory_usage()
         
-        #Added to clear up GPU memory after each epoch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        # if global_step >= args.max_train_steps:
+        #     break
+        
+        # #Added to clear up GPU memory after each epoch
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
+        # gc.collect()
     
         if global_step >= args.max_train_steps or global_step >= args.num_samples // args.train_batch_size:
             break
@@ -1309,26 +1317,44 @@ def main(args):
             save_directory=args.output_dir, transformer_lora_layers=transformer_lora_layers
         )
 
-        pipeline = StableDiffusion3Pipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
+        utils_sd3.validate_log(args,accelerator,vae,text_encoders,\
+            transformer,global_step,weight_dtype,logger=logger)
 
-        # Final inference
-        # Load previous pipeline
-        pipeline = StableDiffusion3Pipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-        # load attention processors
-        pipeline.load_lora_weights(args.output_dir)
 
-        # run inference
-        logger.info("Temporarily disabling validation...")
+        """
+            Sanity Check: Loads the saved model and runs inference.
+        """
+
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
+        # gc.collect()
+
+        # pipeline = StableDiffusion3Pipeline.from_pretrained(
+        #     args.pretrained_model_name_or_path,
+        #     revision=args.revision,
+        #     variant=args.variant,
+        #     torch_dtype=weight_dtype,
+        # )
+        # # load attention processors
+        # pipeline.load_lora_weights(args.output_dir)
+
+        # # run inference
+        # #logger.info("Temporarily disabling validation...")
+        # logger.info("Attempt at validation")
+        # # images = []
+        # if args.validation_prompt and args.num_validation_images > 0:
+        #     pipeline_args = {"prompt": args.validation_prompt}
+        #     images = utils_sd3.log_validation(
+        #         pipeline=pipeline,
+        #         args=args,
+        #         accelerator=accelerator,
+        #         global_step=global_step,
+        #         logger=logger,
+        #         is_final_validation=True,
+        #     )
+
+
+
 
     accelerator.end_training()
 

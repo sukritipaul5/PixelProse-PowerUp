@@ -63,7 +63,7 @@ import io
 import prodigyopt
 import deepspeed
 import safetensors.torch
-
+import wandb
 
 
 
@@ -324,3 +324,91 @@ def load_text_encoders(args,class_one, class_two, class_three):
         args.pretrained_model_name_or_path, subfolder="text_encoder_3", revision=args.revision, variant=args.variant
     )
     return text_encoder_one, text_encoder_two, text_encoder_three
+
+
+
+def validate_log(args,accelerator,vae,text_encoders,transformer,global_step,weight_dtype,logger):
+
+    text_encoder_one,text_encoder_two,text_encoder_three = text_encoders
+
+    torch.cuda.empty_cache()
+    pipeline = StableDiffusion3Pipeline.from_pretrained(
+        args.pretrained_model_name_or_path,
+        vae=vae,
+        text_encoder=accelerator.unwrap_model(text_encoder_one),
+        text_encoder_2=accelerator.unwrap_model(text_encoder_two),
+        text_encoder_3=accelerator.unwrap_model(text_encoder_three),
+        transformer=accelerator.unwrap_model(transformer),
+        revision=args.revision,
+        variant=args.variant,
+        torch_dtype=weight_dtype,
+    ) 
+    print("Pipeline created")                   
+    logger.info("Pipeline created")
+    
+    pipeline_args = {"prompt": args.validation_prompt}
+    images = log_validation(
+        pipeline=pipeline,
+        args=args,
+        accelerator=accelerator,
+        global_step=global_step,
+        logger=logger
+    )                
+    logger.info("Validation completed")
+    del pipeline
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("Cleaned up after validation")
+
+
+def log_validation(
+    pipeline,
+    args,
+    accelerator,
+    global_step,
+    logger,
+    is_final_validation=False,
+):
+    logger.info(
+        f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+        f" {args.validation_prompt}."
+    )
+    
+    # Move entire pipeline to GPU
+    pipeline = pipeline.to(accelerator.device)
+    
+    pipeline.set_progress_bar_config(disable=True)
+
+    # run inference
+    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
+    
+    images = []
+    with torch.no_grad():
+        for _ in range(args.num_validation_images):
+            image = pipeline(
+                prompt=args.validation_prompt, 
+                num_inference_steps=30, 
+                generator=generator
+            ).images[0]
+            images.append(image)
+
+    for tracker in accelerator.trackers:
+        phase_name = "test" if is_final_validation else "validation"
+        if tracker.name == "tensorboard":
+            np_images = np.stack([np.asarray(img) for img in images])
+            tracker.writer.add_images(phase_name, np_images, global_step, dataformats="NHWC")
+        if tracker.name == "wandb":            
+            tracker.log(
+                {
+                    phase_name: [
+                        wandb.Image(image, caption=f"{i}: {args.validation_prompt}") 
+                        for i, image in enumerate(images)
+                    ]
+                }
+            )
+
+    # Move pipeline back to CPU to free up GPU memory
+    #pipeline = pipeline.to("cpu")
+    torch.cuda.empty_cache()
+
+    return images
