@@ -14,7 +14,7 @@
 #SBATCH --wait-all-nodes=1
 #SBATCH --exclusive
 
-rm -r ./tests_data
+rm -r ./tests_logval
 
 NODES_ARRAY=($(scontrol show hostnames $SLURM_JOB_NODELIST))
 HEAD_NODE=${NODES_ARRAY[0]}
@@ -45,9 +45,11 @@ fi
 
 #export dirs
 export MODEL_NAME="stabilityai/stable-diffusion-3-medium-diffusers"
-export OUTPUT_DIR="./tests_data"
+export OUTPUT_DIR="./tests_logval"
 export SCRIPT_DIR="/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/nexus/temp_sd3.py"
-
+#Logging, validation
+export HF_TOKEN="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"
+export WANDB_API_KEY="fdd9c522e7590584e032c3be997620b217e44bd0"
 
 
 # load modules
@@ -57,11 +59,15 @@ module unload cuda/12.4.1
 module load cuda/12.1.1
 
 echo "SLURM_PROCID = $SLURM_PROCID"
-
-
 WORLD_SIZE=$SLURM_JOB_NUM_NODES
 
+#HF CLI Login
+huggingface-cli login --token $HF_TOKEN
+
+
 set -x
+export SD3_VALIDATION_PROMPT="cute dog in a bucket"
+
 export LAUNCH="
     torchrun 
     --rdzv_id $RANDOM \
@@ -70,11 +76,10 @@ export LAUNCH="
     --nnode $WORLD_SIZE \
     --nproc_per_node 4 \
     "
-export SCRIPT="temp_sd3_dataswap.py"
+export SCRIPT="temp_sd3_logval.py"
 export SCRIPT_ARGS=" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --output_dir=$OUTPUT_DIR \
-  --dataset_name="lambdalabs/naruto-blip-captions" \
   --mixed_precision="fp16" \
   --resolution=512 \
   --train_batch_size=4 \
@@ -83,17 +88,20 @@ export SCRIPT_ARGS=" \
   --learning_rate=0.0001 \
   --lr_scheduler="cosine_with_restarts" \
   --lr_warmup_steps=50 \
-  --checkpointing_steps=100 \
+  --checkpointing_steps=10 \
   --gradient_checkpointing \
   --weighting_scheme="logit_normal" \
   --seed=42 \
   --prior_generation_precision="fp16" \
   --use_custom_prompts=True \
-  --dataloader_num_workers=0 \
+  --dataloader_num_workers=4 \
   --adam_weight_decay=1e-02 \
   --max_sequence_length=77 \
-  --max_train_steps=1000 \
-  --num_samples=10000 
+  --max_train_steps=100 \
+  --num_samples=1000 \
+  --validation_prompt="cat" \
+  --num_validation_images=2 \
+  --validation_step=10
   "
 
 # launch job
