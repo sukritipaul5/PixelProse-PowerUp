@@ -1,6 +1,7 @@
 import torch
 from torch.utils.data import IterableDataset
 from torchdata.datapipes.iter import IterableWrapper, FileOpener, TarArchiveLoader, Shuffler, Mapper, Batcher, Filter
+from torchdata.datapipes.iter import IterDataPipe
 from torchdata.dataloader2 import DataLoader2, MultiProcessingReadingService, InProcessReadingService
 from torchvision import transforms
 from PIL import Image
@@ -13,7 +14,7 @@ import json
 import numpy as np
 
 
-class StatefulWebDataset(IterableDataset):
+class StatefulWebDataset(IterDataPipe):
     def __init__(self, tar_path, tokenizers, latents_dir, size=1024, center_crop=False, random_flip=False, max_length=77, num_samples=None):
         self.tokenizers = tokenizers
         self.image_size = size
@@ -29,7 +30,7 @@ class StatefulWebDataset(IterableDataset):
         self.tar_files = sorted(glob.glob(tar_path))
         if not self.tar_files:
             raise FileNotFoundError(f"No files found matching the pattern: {tar_path}")
-        #print(f"Found {len(self.tar_files)} tar files: {self.tar_files}")  
+        print(f"Found {len(self.tar_files)} tar files: {self.tar_files}")  
 
         self.image_transforms = transforms.Compose([
             transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
@@ -39,12 +40,16 @@ class StatefulWebDataset(IterableDataset):
             transforms.Normalize([0.5], [0.5]),
         ])
         self.datapipe = self._create_datapipe()
+        print("Created datapipe")
 
     def _create_datapipe(self):
         datapipe = IterableWrapper(self.tar_files)
+
+        datapipe = Shuffler(datapipe, buffer_size=1000)
+        datapipe = datapipe.sharding_filter()
+
         datapipe = FileOpener(datapipe, mode="rb")
         datapipe = TarArchiveLoader(datapipe)
-        datapipe = Shuffler(datapipe, buffer_size=1000)
         
         def group_data(data):
             image_data = next((d for d in data if d[0].endswith('.jpg')), None)
@@ -135,18 +140,20 @@ class StatefulWebDataset(IterableDataset):
         }
 
     def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is None:  # single-process data loading
-            iter_start = 0
-            iter_end = self.num_samples if self.num_samples is not None else None
-        else:  # in a worker process
-            per_worker = int(math.ceil((self.num_samples or float('inf')) / float(worker_info.num_workers)))
-            worker_id = worker_info.id
-            iter_start = worker_id * per_worker
-            iter_end = min(iter_start + per_worker, self.num_samples) if self.num_samples is not None else None
+        for iter_sample in self.datapipe:
+            yield iter_sample
+        # worker_info = torch.utils.data.get_worker_info()
+        # if worker_info is None:  # single-process data loading
+        #     iter_start = 0
+        #     iter_end = self.num_samples if self.num_samples is not None else None
+        # else:  # in a worker process
+        #     per_worker = int(math.ceil((self.num_samples or float('inf')) / float(worker_info.num_workers)))
+        #     worker_id = worker_info.id
+        #     iter_start = worker_id * per_worker
+        #     iter_end = min(iter_start + per_worker, self.num_samples) if self.num_samples is not None else None
 
-        iterator = itertools.islice(self.datapipe, iter_start, iter_end)
-        return iterator
+        # iterator = itertools.islice(self.datapipe, iter_start, iter_end)
+        # return iterator
 
     def __len__(self):
         return self.num_samples if self.num_samples is not None else float('inf')
@@ -169,9 +176,10 @@ class StatefulWebDataset(IterableDataset):
     
 
 def create_dataloader(dataset, batch_size, num_workers, distributed=False):
-    if distributed:
-        # Sharding
-        dataset.datapipe = dataset.datapipe.sharding_filter()
+    # Vasu: Sharding is done in the datapipe creation, before the dataloader is created 
+    # if distributed:
+    #     # Sharding
+    #     dataset.datapipe = dataset.datapipe.sharding_filter()
     # Batching
     dataset.datapipe = Batcher(dataset.datapipe, batch_size=batch_size)
     dataset.datapipe = Mapper(dataset.datapipe, custom_collate_fn)

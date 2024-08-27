@@ -76,6 +76,7 @@ import safetensors.torch
 import os
 import utils_sd3
 from data_sd3_embed import StatefulWebDataset, create_dataloader
+from datapipe_new import WebDatasetwithCachedLatents, create_simple_dataloader
 import wandb
 
 
@@ -190,6 +191,12 @@ def parse_args(input_args=None):
         type=int,
         default=77,
         help="Maximum sequence length to use with with the T5 text encoder",
+    )
+    parser.add_argument(
+        "--validation_prompts_file",
+        type=str,
+        default="validation_prompts.txt",
+        help="File containing validation prompts.",
     )
     parser.add_argument(
         "--validation_prompt",
@@ -835,6 +842,7 @@ def main(args):
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
+            lr=args.learning_rate,
         )
 
     if args.optimizer.lower() == "prodigy":
@@ -864,29 +872,41 @@ def main(args):
    
 
     # Dataset and DataLoaders creation:
-    train_dataset = StatefulWebDataset(
-    tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/redcaps_part0/redcaps_part0_*.tar",
-    latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/redcaps_part0",
-    tokenizers=tokenizers,
-    size=args.resolution,
-    center_crop=args.center_crop,
-    random_flip=args.random_flip,
-    max_length=args.max_sequence_length,
-    num_samples=args.num_samples
-    )
+    # train_dataset = StatefulWebDataset(
+    # tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/redcaps_part0/redcaps_part0_*.tar",
+    # latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/redcaps_part0",
+    # tokenizers=tokenizers,
+    # size=args.resolution,
+    # center_crop=args.center_crop,
+    # random_flip=args.random_flip,
+    # max_length=args.max_sequence_length,
+    # num_samples=args.num_samples
+    # )
+    TAR_PATH = "/fs/cml-projects/yet-another-diffusion/pixelprose-shards/*/*.tar"
+    LATENTS_DIR = "/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/"
 
+    train_dataset = WebDatasetwithCachedLatents(
+        tar_path=TAR_PATH,
+        latents_dir=LATENTS_DIR,
+        size=args.resolution,
+        center_crop=args.center_crop,
+        random_flip=args.random_flip,
+        max_length=args.max_sequence_length,
+        num_samples=args.num_samples
+    )
+    # Monkey patch the dataset to return the number of samples
+    # train_dataset.__len__ = lambda: args.num_samples
  
     logging.info(f"Number of samples to process: {args.num_samples}")
  
     #added 
     logging.info("Preparing data loader")
-    train_dataloader, estimated_num_batches = create_dataloader(
+    train_dataloader = create_simple_dataloader(
         train_dataset,
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
-        distributed=accelerator.distributed_type != DistributedType.NO
     )
-
+    estimated_num_batches = args.num_samples // args.train_batch_size - 1
 
     if not args.train_text_encoder:
         tokenizers = [tokenizer_one, tokenizer_two, tokenizer_three]
@@ -964,7 +984,7 @@ def main(args):
   
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num examples = {args.num_samples}")
     #logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
     if estimated_num_batches is not None:
         logger.info(f"  Estimated num batches each epoch = {estimated_num_batches}")
@@ -1049,7 +1069,7 @@ def main(args):
 
     prompt_embeds_list = []
     # Check if there is a remainder
-    remainder = len(train_dataset) % args.train_batch_size
+    remainder = args.num_samples % args.train_batch_size
    
 
     # Fill the list with tensors of the array_shape
@@ -1161,34 +1181,33 @@ def main(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                current_time = time.time()
-                time_since_last_log = current_time - last_logging_time
-
-                #added
-                batch_size = len(batch["pixel_values"])
-                samples_this_step = batch_size * accelerator.num_processes
-                samples_since_last_log += samples_this_step
-                total_samples += samples_this_step
-
-                throughput = samples_since_last_log / time_since_last_log
-                
                 # Gather metrics from all processes
                 loss_tensor = torch.tensor([loss.detach().item()], device=accelerator.device)
-                throughput_tensor = torch.tensor([throughput], device=accelerator.device)
 
                 if accelerator.distributed_type != DistributedType.NO:
                     dist.barrier()
                     dist.all_reduce(loss_tensor)
-                    dist.all_reduce(throughput_tensor)
                     
                     # Average the loss
                     world_size = accelerator.num_processes
                     loss_tensor /= world_size
-                    throughput_tensor /= world_size
 
      
                 # Logging
                 if accelerator.is_main_process:
+                    batch_size = len(batch["pixel_values"])
+                    samples_this_step = batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+
+                    current_time = time.time()
+                    time_since_last_log = current_time - last_logging_time
+
+                    #added
+                    samples_since_last_log += samples_this_step
+                    total_samples += samples_this_step
+                    throughput = samples_since_last_log / time_since_last_log
+                    throughput_tensor = torch.tensor([throughput], device=accelerator.device)
+                    
+                    
                     logs = {
                         "loss": loss_tensor.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
@@ -1201,8 +1220,8 @@ def main(args):
                     progress_bar.set_postfix(**logs)
                     accelerator.log(logs, step=global_step)
                 
-                last_logging_time = current_time
-                samples_since_last_log = 0
+                    last_logging_time = current_time
+                    samples_since_last_log = 0
 
                 # Checkpointing
                 if global_step % args.checkpointing_steps == 0:
@@ -1217,6 +1236,7 @@ def main(args):
                 # Validation
                 if accelerator.is_main_process:
                     condition = (args.validation_prompt is not None and (global_step % args.validation_step==0))
+                    unwrapped_transformer = utils_sd3.unwrap_model(transformer,accelerator)
                     if condition:
                         print(global_step,args.validation_step)
                         logger.info(f"Running validation... \nEpoch: {epoch}, Global Step: {global_step}")
@@ -1224,7 +1244,7 @@ def main(args):
 
                         text_encoders = text_encoder_one,text_encoder_two,text_encoder_three
                         utils_sd3.validate_log(args,accelerator,vae,text_encoders,\
-                            transformer,global_step,weight_dtype,logger=logger)
+                            unwrapped_transformer,global_step,weight_dtype,logger=logger)
 
             if global_step >= args.max_train_steps:
                 break          
@@ -1236,8 +1256,9 @@ def main(args):
     # Save the lora layers
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        transformer = utils_sd3.unwrap_model(transformer,accelerator)
-        transformer = transformer.to(torch.float32)
+        accelerator.save_state(os.path.join(args.output_dir, "checkpoint-final"))
+        unwrapped_transformer = utils_sd3.unwrap_model(transformer,accelerator)
+        unwrapped_transformer = unwrapped_transformer.to(torch.float32)
         # transformer_lora_layers = get_peft_model_state_dict(transformer)
 
         # StableDiffusion3Pipeline.save_lora_weights(
@@ -1250,6 +1271,7 @@ def main(args):
             save_function=accelerator.save,
             state_dict=accelerator.get_state_dict(transformer),
         )
+        logger.info("Unwrapped Transformer saved")
 
         pipeline = StableDiffusion3Pipeline.from_pretrained(
             args.pretrained_model_name_or_path,
@@ -1257,11 +1279,12 @@ def main(args):
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
+        logger.info("Pipeline saved")
 
         # utils_sd3.validate_log(args,accelerator,vae,text_encoders,\
         #     transformer,global_step,weight_dtype,logger=logger)
         utils_sd3.validate_log(args, accelerator, vae, text_encoders, unwrapped_transformer, global_step, weight_dtype, logger=logger)
-
+        logger.info("Validation log saved")
 
         """
             Sanity Check: Loads the saved model and runs inference.

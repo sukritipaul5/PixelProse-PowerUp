@@ -355,24 +355,43 @@ def validate_log(args, accelerator, vae, text_encoders, transformer, global_step
     # Set the pipeline to evaluation mode
     pipeline.set_progress_bar_config(disable=True)
     
+    with open(args.validation_prompts_file, "r") as file:
+        prompts = file.readlines()
     # Generate validation images
-    with torch.no_grad():
-        images = pipeline(
-            prompt=args.validation_prompt,
-            num_inference_steps=30,
-            num_images_per_prompt=args.num_validation_images,
-            generator=torch.Generator(device=accelerator.device).manual_seed(args.seed)
-        ).images
+    images = []
+    for prompt in prompts:
+        with torch.no_grad():
+            image = pipeline(
+                prompt=prompt,
+                num_inference_steps=30,
+                num_images_per_prompt=1,
+                generator=torch.Generator(device=accelerator.device).manual_seed(args.seed)
+            ).images[0]
+            images.append(image)
     
+    for tracker in accelerator.trackers:
+        phase_name = "validation"
+        if tracker.name == "tensorboard":
+            np_images = np.stack([np.asarray(img) for img in images])
+            tracker.writer.add_images(phase_name, np_images, global_step, dataformats="NHWC")
+        if tracker.name == "wandb":            
+            tracker.log(
+                {
+                    phase_name: [
+                        wandb.Image(image, caption=f"{i}: {prompt}") 
+                        for i, (image, prompt) in enumerate(zip(images, prompts))
+                    ]
+                }
+            )
     # Log the validation images (assuming you have a log_validation function)
-    log_validation(
-        pipeline=pipeline,
-        args=args,
-        accelerator=accelerator,
-        global_step=global_step,
-        logger=logger,
-        images=images
-    )
+    # log_validation(
+    #     pipeline=pipeline,
+    #     args=args,
+    #     accelerator=accelerator,
+    #     global_step=global_step,
+    #     logger=logger,
+    #     images=images
+    # )
     
     logger.info("Validation completed")
     
