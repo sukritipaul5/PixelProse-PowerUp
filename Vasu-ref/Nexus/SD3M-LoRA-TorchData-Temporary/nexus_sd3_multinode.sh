@@ -7,12 +7,14 @@
 #SBATCH --qos=scavenger
 #SBATCH --partition=scavenger
 #SBATCH --account=scavenger
-#SBATCH --time=01:00:00
-#SBATCH --mem=120G
-#SBATCH --job-name=diff-multinode
-#SBATCH --output=/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/nexus/sd3m-lora-latents/logs/sd3-multinode-%j.out
+#SBATCH --time=00:30:00
+#SBATCH --mem=64G
+#SBATCH --job-name=sd3-multinode
+#SBATCH --output=/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/logs/sd3-multinode-%j.out
 #SBATCH --wait-all-nodes=1
 #SBATCH --exclusive
+
+
 
 #rm -r ./test_latents_batch1
 
@@ -83,7 +85,7 @@ export SCRIPT_ARGS=" \
   --output_dir=$OUTPUT_DIR \
   --mixed_precision="fp16" \
   --resolution=512 \
-  --train_batch_size=1 \
+  --train_batch_size=4 \
   --gradient_accumulation_steps=1 \
   --learning_rate=0.00001 \
   --lr_scheduler="cosine_with_restarts" \
@@ -94,13 +96,15 @@ export SCRIPT_ARGS=" \
   --seed=42 \
   --prior_generation_precision="fp16" \
   --use_custom_prompts=True \
-  --dataloader_num_workers=0 \
+  --dataloader_num_workers=4 \
   --adam_weight_decay=1e-02 \
   --max_sequence_length=77 \
-  --max_train_steps=10000000 \
+  --max_train_steps=1000000 \
   --num_samples=1000000 \
   --num_validation_images=2 \
-  --validation_step=100
+  --validation_step=100 \
+  --rank=1 \
+  --validation_prompt="cat" \
   "
 
 # --validation_prompt="cat" \

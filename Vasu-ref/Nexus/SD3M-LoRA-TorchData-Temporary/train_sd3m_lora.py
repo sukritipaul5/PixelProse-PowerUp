@@ -22,6 +22,8 @@ import shutil
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
+import safetensors.torch
+from accelerate.state import DistributedType
 import ipdb
 import time
 import datetime
@@ -77,7 +79,8 @@ import deepspeed
 import safetensors.torch
 import os
 import utils_sd3
-from data_sd3_embed import StatefulWebDataset, create_dataloader
+#from data_sd3_embed import StatefulWebDataset, create_dataloader
+from data_lite import WebDatasetwithCachedLatents, create_simple_dataloader
 import wandb
 import psutil
 #from memory_profiler import profile
@@ -766,7 +769,7 @@ def main(args):
     # Register the load hook
     accelerator.register_load_state_pre_hook(
         lambda models, input_dir: utils_sd3.load_model_hook(
-            models, input_dir, accelerator, transformer, text_encoder_one, text_encoder_two
+            models, input_dir, accelerator, transformer, text_encoder_one, text_encoder_two, accelerator
         )
     )
         
@@ -878,12 +881,25 @@ def main(args):
    
     
     # Dataset and DataLoaders creation:
-    train_dataset = StatefulWebDataset(
-        # tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/redcaps_part*/*.tar",
-        # latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/",
-        tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/*/*.tar",
-        latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/",
-        tokenizers=tokenizers,
+    # train_dataset = StatefulWebDataset(
+    #     # tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/redcaps_part*/*.tar",
+    #     # latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/",
+    #     tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/*/*.tar",
+    #     latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/",
+    #     tokenizers=tokenizers,
+    #     size=args.resolution,
+    #     center_crop=args.center_crop,
+    #     random_flip=args.random_flip,
+    #     max_length=args.max_sequence_length,
+    #     num_samples=args.num_samples
+    # )
+
+    TAR_PATH = "/fs/cml-projects/yet-another-diffusion/pixelprose-shards/*/*.tar"
+    LATENTS_DIR = "/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/"
+
+    train_dataset = WebDatasetwithCachedLatents(
+        tar_path=TAR_PATH,
+        latents_dir=LATENTS_DIR,
         size=args.resolution,
         center_crop=args.center_crop,
         random_flip=args.random_flip,
@@ -896,26 +912,40 @@ def main(args):
 
     #logging.info(DistributedType.NO)
     log_memory_usage("Before dataloader creation")
-    train_dataloader, estimated_num_batches = create_dataloader(
+    # train_dataloader = create_dataloader(
+    #     tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/*/*.tar",
+    #     latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/",
+    #     batch_size=args.train_batch_size,
+    #     num_workers=args.dataloader_num_workers,
+    #     size=args.resolution,
+    #     center_crop=args.center_crop,
+    #     random_flip=args.random_flip,
+    # )
+
+    is_distributed = accelerator.distributed_type != DistributedType.NO
+    train_dataloader = create_simple_dataloader(
         train_dataset,
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
         distributed=accelerator.distributed_type != DistributedType.NO
     )
+    estimated_num_batches = args.num_samples // args.train_batch_size - 1
+
     logger.info(f"Process {accelerator.process_index} dataloader initialized")
     log_memory_usage("Before dataloader creation")
 
+    #estimated_num_batches
 
-    log_memory_usage("Before first batch fetch")
-    try:
-        first_batch = next(iter(train_dataloader))
-        log_memory_usage("After first batch fetch")
-        print("First batch keys:", first_batch.keys())
-        for k, v in first_batch.items():
-            if isinstance(v, torch.Tensor):
-                print(f"{k} shape: {v.shape}, dtype: {v.dtype}")
-    except Exception as e:
-        print(f"Error fetching first batch: {str(e)}")
+    # log_memory_usage("Before first batch fetch")
+    # try:
+    #     first_batch = next(iter(train_dataloader))
+    #     log_memory_usage("After first batch fetch")
+    #     print("First batch keys:", first_batch.keys())
+    #     for k, v in first_batch.items():
+    #         if isinstance(v, torch.Tensor):
+    #             print(f"{k} shape: {v.shape}, dtype: {v.dtype}")
+    # except Exception as e:
+    #     print(f"Error fetching first batch: {str(e)}")
 
     if not args.train_text_encoder:
         tokenizers = [tokenizer_one, tokenizer_two, tokenizer_three]
@@ -993,12 +1023,13 @@ def main(args):
   
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
+    #logger.info(f"  Num examples = {len(train_dataset)}")
     #logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
-    if estimated_num_batches is not None:
-        logger.info(f"  Estimated num batches each epoch = {estimated_num_batches}")
-    else:
-        logger.info("  Num batches each epoch = Unknown (infinite dataset)")
+    # if estimated_num_batches is not None:
+    #     logger.info(f"  Estimated num batches each epoch = {estimated_num_batches}")
+    # else:
+    #     logger.info("  Num batches each epoch = Unknown (infinite dataset)")
+
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -1007,12 +1038,17 @@ def main(args):
     global_step = 0
     first_epoch = 0
 
+    initial_global_step = 0
+    resume_step = 0
+
+
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
-            # Get the mos recent checkpoint
+            print(f"Resuming from latest checkpoint")
+            # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
@@ -1025,43 +1061,68 @@ def main(args):
             args.resume_from_checkpoint = None
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
-            global_step = int(path.split("-")[1])
 
+            # Try to load the accelerator state, but handle cases where specific files may be missing
+            try:
+                accelerator.load_state(os.path.join(args.output_dir, path))
+            except FileNotFoundError as e:
+                print(f"Error loading state with accelerator: {e}")
+                print("Proceeding with custom loading logic.")
+
+            # Manually load the global step, dataset state, and model weights
+            global_step = int(path.split("-")[1])
             resume_global_step = global_step * args.gradient_accumulation_steps
             first_epoch = global_step // num_update_steps_per_epoch
             resume_step = resume_global_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
 
             # Load dataset state
-            dataset_state = torch.load(os.path.join(args.output_dir, path, "dataset_state.pt"))
-            if hasattr(train_dataset, 'load_state_dict'):
-                train_dataset.load_state_dict(dataset_state)
+            # dataset_state_path = os.path.join(args.output_dir, path, "dataset_state.pt")
+            # if os.path.exists(dataset_state_path):
+            #     dataset_state = torch.load(dataset_state_path)
+            #     train_dataset.set_state(dataset_state)
+            # else:
+            #     print(f"Dataset state file not found at {dataset_state_path}")
 
-            # Recreate the dataloader
-            train_dataloader = accelerator.prepare(
-                create_dataloader(
+            data_state_path = os.path.join(args.output_dir, path, "data_state.pt")
+            if os.path.exists(data_state_path):
+                data_state = torch.load(data_state_path, weights_only=True)
+                if is_distributed:
+                    data_state = accelerator.broadcast(data_state)
+                train_dataset.set_state(data_state['dataset_state'])
+                
+                # Recreate the dataloader with the updated dataset
+                train_dataloader = create_simple_dataloader(
                     train_dataset,
                     batch_size=args.train_batch_size,
                     num_workers=args.dataloader_num_workers,
-                    distributed=accelerator.distributed_type != DistributedType.NO
+                    distributed=is_distributed
                 )
-            )         
-            
+            else:
+                print(f"Dataset state file not found at {data_state_path}")
+
+
+            # Load model weights (replace with actual method to load safetensors)
+            checkpoint_path = os.path.join(args.output_dir, path, "pytorch_lora_weights.safetensors")
+            if os.path.exists(checkpoint_path):
+                print(f"Loading model weights from {checkpoint_path}")
+                state_dict = safetensors.torch.load_file(checkpoint_path)
+                transformer.load_state_dict(state_dict, strict=False)  # Use strict=False to ignore missing keys
+            else:
+                print(f"Model weights not found at {checkpoint_path}")
+    
     else:
         initial_global_step = 0
         first_epoch = 0
         resume_step = 0
   
 
-
     progress_bar = tqdm(
-        range(0, args.max_train_steps),
-        initial=initial_global_step,
+        range(global_step, args.max_train_steps),
+        initial=global_step,
         desc="Steps",
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
     )
-
 
     
     # Number of arrays in the dataloader
@@ -1071,14 +1132,13 @@ def main(args):
     else:
         num_arrays = float('inf') 
 
-
     # Shape of each array
     array_shape = (args.train_batch_size, 154, 4096)
    
 
     prompt_embeds_list = []
     # Check if there is a remainder
-    remainder = len(train_dataset) % args.train_batch_size
+    remainder = args.num_samples % args.train_batch_size
    
 
     # Fill the list with tensors of the array_shape
@@ -1100,7 +1160,7 @@ def main(args):
     samples_since_last_log = 0
 
 
-
+    log_memory_usage("Before training loop")
     for epoch in range(first_epoch, args.num_train_epochs):
         logger.info(f"Starting epoch {epoch}")
         #temp added
@@ -1118,14 +1178,21 @@ def main(args):
 
 
         logger.info("About to start iterating over dataloader")   
-        logger.info(f"Estimated number of batches: {estimated_num_batches}")
+        #logger.info(f"Estimated number of batches: {estimated_num_batches}")
 
 
         for step, batch in enumerate(train_dataloader):
+            print("Data loading probably successful")
             #logger.info(f"Got batch {step}")
             if batch is None:
                 #print("Encountered a None batch, skipping...")
                 continue
+
+            #ADDED
+            # # Check if all required data is present
+            # if not all(k in batch for k in ["pixel_values", "prompt_embeds", "pooled_prompt_embeds"]):
+            #     logger.info(f"Batch at step {step} is missing required data, skipping...")
+            #     continue
             
             #debug temporary
             #logger.info(f"Rank {dist.get_rank() if dist.is_initialized() else 0} - Epoch {epoch}, Step {step}")
@@ -1140,10 +1207,10 @@ def main(args):
                 #print(prompt_embeds.shape,pooled_prompt_embeds.shape)
 
                 #debug temporary- note this is not taking in more than 1 batch irrespective of train_batch_size.
-                # logger.info(f"Batch keys: {batch.keys()}")
-                # logger.info(f"Pixel values shape: {batch['pixel_values'].shape}")
-                # logger.info(f"Prompt embeds shape: {batch['prompt_embeds'].shape}")
-                # logger.info(f"Pooled prompt embeds shape: {batch['pooled_prompt_embeds'].shape}")
+                logger.info(f"Batch keys: {batch.keys()}")
+                logger.info(f"Pixel values shape: {batch['pixel_values'].shape}")
+                logger.info(f"Prompt embeds shape: {batch['prompt_embeds'].shape}")
+                logger.info(f"Pooled prompt embeds shape: {batch['pooled_prompt_embeds'].shape}")
 
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
@@ -1218,6 +1285,7 @@ def main(args):
                 time_since_last_log = current_time - last_logging_time
 
                 #added
+                logging.info(f'BATCH SIZE CHECK: {len(batch["pixel_values"])}')
                 batch_size = len(batch["pixel_values"])
                 samples_this_step = batch_size * accelerator.num_processes
                 samples_since_last_log += samples_this_step
@@ -1264,8 +1332,21 @@ def main(args):
                         accelerator.save_state(save_path)
                         
                         # Save dataset state instead of dataloader state
-                        dataset_state = train_dataset.state_dict() if hasattr(train_dataset, 'state_dict') else {}
-                        torch.save(dataset_state, os.path.join(save_path, "dataset_state.pt"))
+                        # dataset_state = train_dataset.state_dict() if hasattr(train_dataset, 'state_dict') else {}
+                        # torch.save(dataset_state, os.path.join(save_path, "dataset_state.pt"))
+                        # dataset_state = train_dataset.state_dict() if hasattr(train_dataset, 'state_dict') else {}
+                        # torch.save(dataset_state, os.path.join(save_path, "dataset_state.pt"))
+                        
+                        # dataset_state = train_dataset.get_state()
+                        # torch.save(dataset_state, os.path.join(save_path, "dataset_state.pt"))
+
+                        dataset_state = train_dataset.get_state()
+                        torch.save({
+                            'dataset_state': dataset_state,
+                        }, os.path.join(save_path, "data_state.pt"))
+
+                        
+                                                            
 
                 # Validation
                 if accelerator.is_main_process:
