@@ -1,26 +1,10 @@
-#!/usr/bin/env bash
-#SBATCH --tasks=2
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtxa5000:4
-#SBATCH --qos=scavenger
-#SBATCH --partition=scavenger
-#SBATCH --account=scavenger
-#SBATCH --time=01:00:00
-#SBATCH --mem=120G
-#SBATCH --job-name=sd3-multinode
-#SBATCH --output=/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/nexus/sd3m-lora-latents/logs/sd3-multinode-%j.out
-#SBATCH --wait-all-nodes=1
-#SBATCH --exclusive
 
-#rm -r ./tests_latent_dl
+rm -r ./tests_latents
 
-NODES_ARRAY=($(scontrol show hostnames $SLURM_JOB_NODELIST))
-HEAD_NODE=${NODES_ARRAY[0]}
-HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" hostname --ip-address | awk '{print $1}')
-
-echo HEAD_NODE_IP = $HEAD_NODE_IP
+# NODES_ARRAY=($(scontrol show hostnames $SLURM_JOB_NODELIST))
+# HEAD_NODE=${NODES_ARRAY[0]}
+# HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" hostname --ip-address | awk '{print $1}')
+# echo HEAD_NODE_IP = $HEAD_NODE_IP
 
 # envs
 export CUDA_LAUNCH_BLOCKING=0
@@ -45,15 +29,15 @@ fi
 
 #export dirs
 export MODEL_NAME="stabilityai/stable-diffusion-3-medium-diffusers"
-export OUTPUT_DIR="./tests_latent_dl"
-#export SCRIPT_DIR="/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/nexus/"
+export OUTPUT_DIR="./tests_latents"
+export SCRIPT_DIR="/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/nexus/temp_sd3.py"
 #Logging, validation
 export HF_TOKEN="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"
 export WANDB_API_KEY="fdd9c522e7590584e032c3be997620b217e44bd0"
 
 
 # load modules
-source activate /fs/cml-projects/yet-another-diffusion/sd3m-diffusion/env/sd3-medium-lora
+#source activate /fs/cml-projects/yet-another-diffusion/sd3m-diffusion/env/sd3-medium-lora
 
 module unload cuda/12.4.1
 module load cuda/12.1.1
@@ -66,17 +50,18 @@ huggingface-cli login --token $HF_TOKEN
 
 
 set -x
-#export SD3_VALIDATION_PROMPT="cute dog in a bucket"
+export SD3_VALIDATION_PROMPT="cute dog in a bucket"
 
-export LAUNCH="
-    torchrun 
-    --rdzv_id $RANDOM \
-    --rdzv_backend c10d \
-    --rdzv-endpoint $HEAD_NODE_IP:12384 \
-    --nnode $WORLD_SIZE \
-    --nproc_per_node 4 \
-    "
+# export LAUNCH="
+#     torchrun 
+#     --rdzv_id $RANDOM \
+#     --rdzv_backend c10d \
+#     --rdzv-endpoint $HEAD_NODE_IP:12384 \
+#     --nnode $WORLD_SIZE \
+#     --nproc_per_node 4 \
+#     "
 
+export LAUNCH="python "
 export SCRIPT="train_sd3m_lora.py"
 export SCRIPT_ARGS=" \
   --pretrained_model_name_or_path=$MODEL_NAME \
@@ -84,27 +69,29 @@ export SCRIPT_ARGS=" \
   --mixed_precision="fp16" \
   --resolution=512 \
   --train_batch_size=2 \
-  --gradient_accumulation_steps=2 \
+  --gradient_accumulation_steps=1 \
   --learning_rate=0.00001 \
   --lr_scheduler="cosine_with_restarts" \
   --lr_warmup_steps=5 \
-  --checkpointing_steps=100 \
+  --checkpointing_steps=10 \
   --gradient_checkpointing \
   --weighting_scheme="logit_normal" \
   --seed=42 \
   --prior_generation_precision="fp16" \
   --use_custom_prompts=True \
-  --dataloader_num_workers=0 \
+  --dataloader_num_workers=2 \
   --adam_weight_decay=1e-02 \
   --max_sequence_length=77 \
-  --max_train_steps=1000 \
+  --max_train_steps=100000000 \
   --num_samples=10000000 \
   --num_validation_images=2 \
-  --validation_step=10
+  --validation_step=100 \
   "
-
-# --validation_prompt="cat" \
+# --resume_from_checkpoint=latest
+#--resume_from_checkpoint=latest
 # launch job
 export CMD="$LAUNCH $SCRIPT $SCRIPT_ARGS"
-srun $CMD
+#srun $CMD
+$CMD
+
 

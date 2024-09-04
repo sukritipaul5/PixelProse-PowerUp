@@ -77,6 +77,7 @@ def check_disk_space(path):
     print(f"Used: {used // (2**30)} GB")
     print(f"Free: {free // (2**30)} GB")
 
+
 def collate_fn(examples, with_prior_preservation=False):
     pixel_values = [example["instance_images"] for example in examples]
     prompts = [example["instance_prompt"] for example in examples]
@@ -266,11 +267,11 @@ def save_model_hook(models, weights, output_dir, accelerator, transformer, text_
         )
 
 
-def load_model_hook(models, input_dir, accelerator, transformer, text_encoder_one, text_encoder_two):
+def load_model_hook(models, input_dir, accelerator, transformer, text_encoder_one, text_encoder_two, accelerator_):
     lora_state_dict = StableDiffusion3Pipeline.lora_state_dict(input_dir)
 
     for model in models:
-        if isinstance(model, type(unwrap_model(transformer))):
+        if isinstance(model, type(unwrap_model(transformer, accelerator))):
             transformer_state_dict = {
                 f'{k.replace("transformer.", "")}': v for k, v in lora_state_dict.items() if k.startswith("unet.")
             }
