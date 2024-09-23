@@ -237,56 +237,6 @@ def unwrap_model(model,accelerator):
 
 
 
-# create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a decent format
-# def save_model_hook(models, weights, output_dir, accelerator, transformer, text_encoder_one, text_encoder_two):
-#     if accelerator.is_main_process:
-#         transformer_lora_layers_to_save = None
-#         text_encoder_one_lora_layers_to_save = None
-#         text_encoder_two_lora_layers_to_save = None
-
-#         for model in models:
-#             unwrapped_model = unwrap_model(model, accelerator)
-#             if isinstance(unwrapped_model, type(unwrap_model(transformer, accelerator))):
-#                 transformer_lora_layers_to_save = get_peft_model_state_dict(unwrapped_model)
-#             elif isinstance(unwrapped_model, type(unwrap_model(text_encoder_one, accelerator))):
-#                 text_encoder_one_lora_layers_to_save = get_peft_model_state_dict(unwrapped_model)
-#             elif isinstance(unwrapped_model, type(unwrap_model(text_encoder_two, accelerator))):
-#                 text_encoder_two_lora_layers_to_save = get_peft_model_state_dict(unwrapped_model)
-#             else:
-#                 raise ValueError(f"unexpected save model: {unwrapped_model.__class__}")
-
-#             #pop weight so that corresponding model is not saved again!
-#             weights.pop()
-
-#         StableDiffusion3Pipeline.save_lora_weights(
-#             output_dir,
-#             transformer_lora_layers=transformer_lora_layers_to_save,
-#             text_encoder_lora_layers=text_encoder_one_lora_layers_to_save,
-#             text_encoder_2_lora_layers=text_encoder_two_lora_layers_to_save,
-#         )
-
-
-# def load_model_hook(models, input_dir, accelerator, transformer, text_encoder_one, text_encoder_two):
-#     lora_state_dict = StableDiffusion3Pipeline.lora_state_dict(input_dir)
-
-#     for model in models:
-#         if isinstance(model, type(unwrap_model(transformer))):
-#             transformer_state_dict = {
-#                 f'{k.replace("transformer.", "")}': v for k, v in lora_state_dict.items() if k.startswith("unet.")
-#             }
-#             transformer_state_dict = convert_unet_state_dict_to_peft(transformer_state_dict)
-#             set_peft_model_state_dict(model, transformer_state_dict, adapter_name="default")
-#         elif isinstance(model, type(unwrap_model(text_encoder_one))):
-#             _set_state_dict_into_text_encoder(lora_state_dict, prefix="text_encoder.", text_encoder=model)
-#         elif isinstance(model, type(unwrap_model(text_encoder_two))):
-#             _set_state_dict_into_text_encoder(lora_state_dict, prefix="text_encoder_2.", text_encoder=model)
-#         else:
-#             raise ValueError(f"unexpected load model: {model.__class__}")
-
-#     if accelerator.mixed_precision == "fp16":
-#         cast_training_params([transformer, text_encoder_one, text_encoder_two])
-
-
 
 def get_sigmas(accelerator,noise_scheduler_copy,timesteps, n_dim=4, dtype=torch.float32):
     sigmas = noise_scheduler_copy.sigmas.to(device=accelerator.device, dtype=dtype)
@@ -355,24 +305,35 @@ def validate_log(args, accelerator, vae, text_encoders, transformer, global_step
     # Set the pipeline to evaluation mode
     pipeline.set_progress_bar_config(disable=True)
     
+    with open(args.validation_prompts_file, "r") as file:
+        prompts = file.readlines()
     # Generate validation images
-    with torch.no_grad():
-        images = pipeline(
-            prompt=args.validation_prompt,
-            num_inference_steps=30,
-            num_images_per_prompt=args.num_validation_images,
-            generator=torch.Generator(device=accelerator.device).manual_seed(args.seed)
-        ).images
+    images = []
+    for prompt in prompts:
+        with torch.no_grad():
+            image = pipeline(
+                prompt=prompt,
+                num_inference_steps=30,
+                num_images_per_prompt=1,
+                generator=torch.Generator(device=accelerator.device).manual_seed(args.seed)
+            ).images[0]
+            images.append(image)
     
-    # Log the validation images (assuming you have a log_validation function)
-    log_validation(
-        pipeline=pipeline,
-        args=args,
-        accelerator=accelerator,
-        global_step=global_step,
-        logger=logger,
-        images=images
-    )
+    for tracker in accelerator.trackers:
+        phase_name = "validation"
+        if tracker.name == "tensorboard":
+            np_images = np.stack([np.asarray(img) for img in images])
+            tracker.writer.add_images(phase_name, np_images, global_step, dataformats="NHWC")
+        if tracker.name == "wandb":            
+            tracker.log(
+                {
+                    phase_name: [
+                        wandb.Image(image, caption=f"{i}: {prompt}") 
+                        for i, (image, prompt) in enumerate(zip(images, prompts))
+                    ]
+                }
+            )
+
     
     logger.info("Validation completed")
     
@@ -383,39 +344,6 @@ def validate_log(args, accelerator, vae, text_encoders, transformer, global_step
 
     return images
 
-    
-# def validate_log(args,accelerator,vae,text_encoders,transformer,global_step,weight_dtype,logger):
-
-#     text_encoder_one,text_encoder_two,text_encoder_three = text_encoders
-
-#     torch.cuda.empty_cache()
-#     pipeline = StableDiffusion3Pipeline.from_pretrained(
-#         args.pretrained_model_name_or_path,
-#         vae=vae,
-#         text_encoder=accelerator.unwrap_model(text_encoder_one),
-#         text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-#         text_encoder_3=accelerator.unwrap_model(text_encoder_three),
-#         transformer=accelerator.unwrap_model(transformer),
-#         revision=args.revision,
-#         variant=args.variant,
-#         torch_dtype=weight_dtype,
-#     ) 
-#     print("Pipeline created")                   
-#     logger.info("Pipeline created")
-    
-#     pipeline_args = {"prompt": args.validation_prompt}
-#     images = log_validation(
-#         pipeline=pipeline,
-#         args=args,
-#         accelerator=accelerator,
-#         global_step=global_step,
-#         logger=logger
-#     )                
-#     logger.info("Validation completed")
-#     del pipeline
-#     if torch.cuda.is_available():
-#         torch.cuda.empty_cache()
-#     logger.info("Cleaned up after validation")
 
 
 def log_validation(
@@ -467,3 +395,14 @@ def log_validation(
     torch.cuda.empty_cache()
 
     return images
+
+def cosine_warmup_schedule(step, warmup_steps):
+    """
+        Used for gradual warmup of prompt_embeds trainable params along wiwth a gradient mask.
+    """
+
+    if step < warmup_steps:
+        return (1 - np.cos(np.pi * step / warmup_steps)) / 2  # Using a cosine-based gradual increase
+    return 1.0
+
+
