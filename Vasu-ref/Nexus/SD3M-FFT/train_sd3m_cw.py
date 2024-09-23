@@ -42,11 +42,11 @@ from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
 from torchvision import transforms
 import torch.distributed as dist
-
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 from transformers import CLIPTokenizer, PretrainedConfig, T5TokenizerFast
 import webdataset as wds
+
 import diffusers
 from diffusers import (
     AutoencoderKL,
@@ -68,6 +68,9 @@ from diffusers.utils import (
 )
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.torch_utils import is_compiled_module
+
+
+#import zstandard as zstd
 from PIL import Image
 import io
 import prodigyopt
@@ -75,22 +78,17 @@ import deepspeed
 import safetensors.torch
 import os
 import utils_sd3
-from data_sd3_embed import StatefulWebDataset, create_dataloader
+#from data_sd3_pp import WebDatasetAdapter
+from datapipe_new import WebDatasetwithCachedLatents, create_simple_dataloader
 import wandb
 
 
-# if is_wandb_available():
-#     import wandb
-
 # Will error if the minimal version of diffusers is not installed. 
 check_min_version("0.30.0.dev0")
-
-
 logger = get_logger(__name__)
 os.environ['WANDB_MODE'] = 'online'
 os.environ['LD_LIBRARY_PATH'] = '/soft/compilers/cudatoolkit/cuda-12.2.2/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
 os.environ['CUDA_HOME'] = '/soft/compilers/cudatoolkit/cuda-12.2.2'
-
 
 def import_model_class_from_model_name_or_path(
     pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
@@ -192,6 +190,12 @@ def parse_args(input_args=None):
         help="Maximum sequence length to use with with the T5 text encoder",
     )
     parser.add_argument(
+        "--validation_prompts_file",
+        type=str,
+        default="/fs/cml-projects/yet-another-diffusion/sd3m-cw-expts/scripts/validation_prompts.txt",
+        help="File containing validation prompts.",
+    )
+    parser.add_argument(
         "--validation_prompt",
         type=str,
         default="A cat driving a car, high detail, 8K resolution.",
@@ -219,7 +223,6 @@ def parse_args(input_args=None):
         default=500,
         help=("Use iters instead" ),
     )
-
 
     parser.add_argument(
         "--with_prior_preservation",
@@ -276,7 +279,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
     )
-    
+     
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
         "--max_train_steps",
@@ -511,6 +514,7 @@ def parse_args(input_args=None):
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
+
     
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -528,8 +532,6 @@ def parse_args(input_args=None):
 
 
 def main(args):
-
-
     os.makedirs(args.output_dir, exist_ok=True)
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -542,7 +544,6 @@ def main(args):
     logging.info("Starting main function")
     logging.info("Initializing accelerator")
 
-
     if dist.is_available() and dist.is_initialized():
         # In distributed setting, only report on rank 0
         if dist.get_rank() == 0:
@@ -552,7 +553,6 @@ def main(args):
     else:
         # In non-distributed setting (including single GPU), always report
         args.report_to = "wandb"
-
 
     accelerator_project_config = ProjectConfiguration(
         project_dir=args.output_dir,
@@ -574,7 +574,6 @@ def main(args):
     if accelerator.is_main_process:
         import wandb
         wandb.init(project="sd3medium-lora-finetune", config=args)
-
     logger.info(f"Distributed environment: {accelerator.distributed_type}")
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
         logger.info("DeepSpeed is enabled")
@@ -689,7 +688,6 @@ def main(args):
         args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
     )
 
-    #Ask Vasu what this should be?
     transformer.requires_grad_(True) #train
     vae.requires_grad_(False)
     text_encoder_one.requires_grad_(False)
@@ -722,39 +720,6 @@ def main(args):
             text_encoder_one.gradient_checkpointing_enable()
             text_encoder_two.gradient_checkpointing_enable()
 
-    # # now we will add new LoRA weights to the attention layers
-    # transformer_lora_config = LoraConfig(
-    #     r=args.rank,
-    #     lora_alpha=args.rank,
-    #     init_lora_weights="gaussian",
-    #     target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-    # )
-    # transformer.add_adapter(transformer_lora_config)
-
-    # if args.train_text_encoder:
-    #     text_lora_config = LoraConfig(
-    #         r=args.rank,
-    #         lora_alpha=args.rank,
-    #         init_lora_weights="gaussian",
-    #         target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
-    #     )
-    #     text_encoder_one.add_adapter(text_lora_config)
-    #     text_encoder_two.add_adapter(text_lora_config)
-
-    # # Register the save hook
-    # accelerator.register_save_state_pre_hook(
-    #     lambda models, weights, output_dir: utils_sd3.save_model_hook(
-    #         models, weights, output_dir, accelerator, transformer, text_encoder_one, text_encoder_two
-    #     )
-    # )
-
-    # # Register the load hook
-    # accelerator.register_load_state_pre_hook(
-    #     lambda models, input_dir: utils_sd3.load_model_hook(
-    #         models, input_dir, accelerator, transformer, text_encoder_one, text_encoder_two
-    #     )
-    # )
-        
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -799,8 +764,8 @@ def main(args):
             text_lora_parameters_two_with_lr,
         ]
     else:
-        #params_to_optimize = [transformer_parameters_with_lr]
         params_to_optimize = list(transformer.parameters())
+
 
     # Optimizer creation
     if not (args.optimizer.lower() == "prodigy" or args.optimizer.lower() == "adamw"):
@@ -835,6 +800,7 @@ def main(args):
             betas=(args.adam_beta1, args.adam_beta2),
             weight_decay=args.adam_weight_decay,
             eps=args.adam_epsilon,
+            lr=args.learning_rate,
         )
 
     if args.optimizer.lower() == "prodigy":
@@ -864,35 +830,38 @@ def main(args):
    
 
     # Dataset and DataLoaders creation:
-    train_dataset = StatefulWebDataset(
-    tar_path="/fs/cml-projects/yet-another-diffusion/pixelprose-shards/redcaps_part0/redcaps_part0_*.tar",
-    latents_dir="/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/redcaps_part0",
-    tokenizers=tokenizers,
-    size=args.resolution,
-    center_crop=args.center_crop,
-    random_flip=args.random_flip,
-    max_length=args.max_sequence_length,
-    num_samples=args.num_samples
+    TAR_PATH = "/fs/cml-projects/yet-another-diffusion/pixelprose-shards/*/*.tar"
+    LATENTS_DIR = "/fs/cml-projects/yet-another-diffusion/pixelprose_sd3_latents/"
+    
+
+    train_dataset = WebDatasetwithCachedLatents(
+        tar_path=TAR_PATH,
+        latents_dir=LATENTS_DIR,
+        tokenizers=tokenizers, #TODO: Check this bit in data.py 
+        size=args.resolution,
+        center_crop=args.center_crop,
+        random_flip=args.random_flip,
+        max_length=args.max_sequence_length,
+        num_samples=args.num_samples
     )
 
- 
     logging.info(f"Number of samples to process: {args.num_samples}")
- 
-    #added 
+
+    #added
     logging.info("Preparing data loader")
-    train_dataloader, estimated_num_batches = create_dataloader(
+    train_dataloader = create_simple_dataloader(
         train_dataset,
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
-        distributed=accelerator.distributed_type != DistributedType.NO
     )
+    estimated_num_batches = args.num_samples // args.train_batch_size - 1
 
 
     if not args.train_text_encoder:
         tokenizers = [tokenizer_one, tokenizer_two, tokenizer_three]
         text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
 
-
+    
     # For MDS dataset, we don't pre-compute embeddings because each image has a unique prompt
     logger.info("Using custom prompts for each image.")
     prompt_embeds = None
@@ -918,7 +887,6 @@ def main(args):
     power=args.lr_power,
     )
 
-
     # Prepare everything with our `accelerator`.
     if args.train_text_encoder:
         (
@@ -941,17 +909,15 @@ def main(args):
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(args.num_samples / (args.train_batch_size * args.gradient_accumulation_steps))
-
+    
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
 
     # We cap the number of training steps to ensure we don't exceed the number of available samples
-   
     args.max_train_steps = min(args.max_train_steps, num_update_steps_per_epoch * args.num_train_epochs)
 
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
- 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
@@ -959,12 +925,10 @@ def main(args):
         accelerator.init_trackers(tracker_name, config=vars(args))
 
     # Train!
-    
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-  
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num examples = {args.num_samples}")
     #logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
     if estimated_num_batches is not None:
         logger.info(f"  Estimated num batches each epoch = {estimated_num_batches}")
@@ -1002,7 +966,6 @@ def main(args):
             resume_global_step = global_step * args.gradient_accumulation_steps
             first_epoch = global_step // num_update_steps_per_epoch
             resume_step = resume_global_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
-
             # Load dataset state
             dataset_state = torch.load(os.path.join(args.output_dir, path, "dataset_state.pt"))
             if hasattr(train_dataset, 'load_state_dict'):
@@ -1010,20 +973,18 @@ def main(args):
 
             # Recreate the dataloader
             train_dataloader = accelerator.prepare(
-                create_dataloader(
+                create_simple_dataloader(
                     train_dataset,
                     batch_size=args.train_batch_size,
                     num_workers=args.dataloader_num_workers,
                     distributed=accelerator.distributed_type != DistributedType.NO
                 )
-            )         
-            
+            )
+
     else:
         initial_global_step = 0
         first_epoch = 0
         resume_step = 0
-  
-
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -1034,7 +995,6 @@ def main(args):
     )
 
 
-    
     # Number of arrays in the dataloader
     if estimated_num_batches is not None:
         
@@ -1042,15 +1002,12 @@ def main(args):
     else:
         num_arrays = float('inf') 
 
-
     # Shape of each array
     array_shape = (args.train_batch_size, 154, 4096)
-   
 
     prompt_embeds_list = []
     # Check if there is a remainder
-    remainder = len(train_dataset) % args.train_batch_size
-   
+    remainder = args.num_samples % args.train_batch_size
 
     # Fill the list with tensors of the array_shape
     for i in range(num_arrays):
@@ -1071,25 +1028,72 @@ def main(args):
     samples_since_last_log = 0
 
 
-
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
-                
         for step, batch in enumerate(train_dataloader):
             if batch is None:
                 print("Encountered a None batch, skipping...")
-                continue
-            
+                continue    
             
             models_to_accumulate = [transformer]
             with accelerator.accumulate(models_to_accumulate):
 
                 pixel_values = batch["pixel_values"].to(dtype=vae.dtype, device=accelerator.device)
+                
+                # [REF]: For our context window experiments
+                tokenized_prompts = batch["tokenized_vlm_captions"]  
+                
+                if (args.use_custom_prompts==True):
+                    # Encode prompts for each tokenizer
+                    prompt_embeds_list = []
+                    pooled_prompt_embeds_list = []
+                    for i, (tokenized_prompt, text_encoder) in enumerate(zip(tokenized_prompts, text_encoders)):
+                        input_ids = tokenized_prompt["input_ids"].to(device=accelerator.device)
+                        attention_mask = tokenized_prompt["attention_mask"].to(device=accelerator.device)
+                        
+                        if i < 2:  # CLIP text encoders
+                            prompt_embeds = text_encoder(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                output_hidden_states=True
+                            )
+                            prompt_embeds_list.append(prompt_embeds.hidden_states[-2])
+                            pooled_prompt_embeds_list.append(prompt_embeds[0])
+                        else:  # T5 text encoder
+                            prompt_embeds = text_encoder(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                            )[0]
+                            prompt_embeds_list.append(prompt_embeds)
 
-                #torch.cuda.synchronize()
-                prompt_embeds = batch["prompt_embeds"].to(device=accelerator.device)
-                pooled_prompt_embeds = batch["pooled_prompt_embeds"].to(device=accelerator.device)
-                #print(prompt_embeds.shape,pooled_prompt_embeds.shape)
+                    # Concatenate CLIP embeddings
+                    clip_prompt_embeds = torch.cat(prompt_embeds_list[:2], dim=-1)
+                    pooled_prompt_embeds = torch.cat(pooled_prompt_embeds_list, dim=-1)
+                    
+                    # Pad CLIP embeddings to match T5 embedding size
+                    t5_prompt_embeds = prompt_embeds_list[2]
+                    clip_prompt_embeds = torch.nn.functional.pad(
+                        clip_prompt_embeds, (0, t5_prompt_embeds.shape[-1] - clip_prompt_embeds.shape[-1])
+                    )
+                    
+                    # Concatenate all embeddings
+                    # Need to change here. Make part of this trainable. 
+                    prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embeds], dim=-2)
+                    
+                    
+                    
+                    
+
+                    """
+                        Trainable part of prompt_embeds
+                        prompt_embeds[:,:77,2048:]
+                        #create gradient masking.
+                        Can be optimized by moving gradient creation outside the loop. It is once time operation
+                    """
+                    prompt_embeds.requires_grad = True
+                    gradient_mask = torch.zeros_like(prompt_embeds)
+                    gradient_mask[:,:77,2048:] = 1.0
+                    
  
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
@@ -1115,8 +1119,6 @@ def main(args):
                 # Add noise according to flow matching.
                 sigmas = utils_sd3.get_sigmas(accelerator,noise_scheduler_copy,timesteps, n_dim=model_input.ndim, dtype=model_input.dtype)
                 noisy_model_input = sigmas * noise + (1.0 - sigmas) * model_input
-           
-                
 
                 if len(model_input) != len(prompt_embeds):
                     prompt_embeds = prompt_embeds[:len(model_input),:,:]
@@ -1147,9 +1149,18 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    #params_to_clip = transformer_lora_parameters
-                    #accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                     accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+
+                """
+                    Added to ensure that we train only a part of prompt embeds. 
+                    hard coded as of now.
+                """
+                # Apply gradient mask with cosine warm-up
+                warmup_steps = 5000  # Number of steps for warm-up
+                warmup_factor = utils_sd3.cosine_warmup_schedule(step,warmup_steps)
+                with torch.no_grad():
+                    current_mask = gradient_mask * warmup_factor
+                    prompt_embeds.grad *= current_mask
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -1161,34 +1172,33 @@ def main(args):
                 progress_bar.update(1)
                 global_step += 1
 
-                current_time = time.time()
-                time_since_last_log = current_time - last_logging_time
-
-                #added
-                batch_size = len(batch["pixel_values"])
-                samples_this_step = batch_size * accelerator.num_processes
-                samples_since_last_log += samples_this_step
-                total_samples += samples_this_step
-
-                throughput = samples_since_last_log / time_since_last_log
-                
                 # Gather metrics from all processes
                 loss_tensor = torch.tensor([loss.detach().item()], device=accelerator.device)
-                throughput_tensor = torch.tensor([throughput], device=accelerator.device)
 
                 if accelerator.distributed_type != DistributedType.NO:
                     dist.barrier()
                     dist.all_reduce(loss_tensor)
-                    dist.all_reduce(throughput_tensor)
                     
                     # Average the loss
                     world_size = accelerator.num_processes
                     loss_tensor /= world_size
-                    throughput_tensor /= world_size
 
      
                 # Logging
                 if accelerator.is_main_process:
+                    batch_size = len(batch["pixel_values"])
+                    samples_this_step = batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+
+                    current_time = time.time()
+                    time_since_last_log = current_time - last_logging_time
+
+                    #added
+                    samples_since_last_log += samples_this_step
+                    total_samples += samples_this_step
+                    throughput = samples_since_last_log / time_since_last_log
+                    throughput_tensor = torch.tensor([throughput], device=accelerator.device)
+                    
+                    
                     logs = {
                         "loss": loss_tensor.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
@@ -1201,8 +1211,8 @@ def main(args):
                     progress_bar.set_postfix(**logs)
                     accelerator.log(logs, step=global_step)
                 
-                last_logging_time = current_time
-                samples_since_last_log = 0
+                    last_logging_time = current_time
+                    samples_since_last_log = 0
 
                 # Checkpointing
                 if global_step % args.checkpointing_steps == 0:
@@ -1217,6 +1227,7 @@ def main(args):
                 # Validation
                 if accelerator.is_main_process:
                     condition = (args.validation_prompt is not None and (global_step % args.validation_step==0))
+                    unwrapped_transformer = utils_sd3.unwrap_model(transformer,accelerator)
                     if condition:
                         print(global_step,args.validation_step)
                         logger.info(f"Running validation... \nEpoch: {epoch}, Global Step: {global_step}")
@@ -1224,7 +1235,7 @@ def main(args):
 
                         text_encoders = text_encoder_one,text_encoder_two,text_encoder_three
                         utils_sd3.validate_log(args,accelerator,vae,text_encoders,\
-                            transformer,global_step,weight_dtype,logger=logger)
+                            unwrapped_transformer,global_step,weight_dtype,logger=logger)
 
             if global_step >= args.max_train_steps:
                 break          
@@ -1232,17 +1243,14 @@ def main(args):
         # Check for early stopping
         if global_step >= args.max_train_steps or global_step >= args.num_samples // args.train_batch_size:
             break
-    
+
     # Save the lora layers
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        transformer = utils_sd3.unwrap_model(transformer,accelerator)
-        transformer = transformer.to(torch.float32)
-        # transformer_lora_layers = get_peft_model_state_dict(transformer)
-
-        # StableDiffusion3Pipeline.save_lora_weights(
-        #     save_directory=args.output_dir, transformer_lora_layers=transformer_lora_layers
-        # )
+        accelerator.save_state(os.path.join(args.output_dir, "checkpoint-final"))
+        unwrapped_transformer = utils_sd3.unwrap_model(transformer,accelerator)
+        unwrapped_transformer = unwrapped_transformer.to(torch.float32)
+     
 
         unwrapped_transformer.save_pretrained(
             os.path.join(args.output_dir, "transformer_model"),
@@ -1250,6 +1258,7 @@ def main(args):
             save_function=accelerator.save,
             state_dict=accelerator.get_state_dict(transformer),
         )
+        logger.info("Unwrapped Transformer saved")
 
         pipeline = StableDiffusion3Pipeline.from_pretrained(
             args.pretrained_model_name_or_path,
@@ -1257,46 +1266,10 @@ def main(args):
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
+        logger.info("Pipeline saved")
 
-        # utils_sd3.validate_log(args,accelerator,vae,text_encoders,\
-        #     transformer,global_step,weight_dtype,logger=logger)
         utils_sd3.validate_log(args, accelerator, vae, text_encoders, unwrapped_transformer, global_step, weight_dtype, logger=logger)
-
-
-        """
-            Sanity Check: Loads the saved model and runs inference.
-        """
-
-        # if torch.cuda.is_available():
-        #     torch.cuda.empty_cache()
-        # gc.collect()
-
-        # pipeline = StableDiffusion3Pipeline.from_pretrained(
-        #     args.pretrained_model_name_or_path,
-        #     revision=args.revision,
-        #     variant=args.variant,
-        #     torch_dtype=weight_dtype,
-        # )
-        # # load attention processors
-        # pipeline.load_lora_weights(args.output_dir)
-
-        # # run inference
-        # #logger.info("Temporarily disabling validation...")
-        # logger.info("Attempt at validation")
-        # # images = []
-        # if args.validation_prompt and args.num_validation_images > 0:
-        #     pipeline_args = {"prompt": args.validation_prompt}
-        #     images = utils_sd3.log_validation(
-        #         pipeline=pipeline,
-        #         args=args,
-        #         accelerator=accelerator,
-        #         global_step=global_step,
-        #         logger=logger,
-        #         is_final_validation=True,
-        #     )
-
-
-
+        logger.info("Validation log saved")
 
     accelerator.end_training()
 
@@ -1304,4 +1277,3 @@ def main(args):
 if __name__ == "__main__":
     args = parse_args()
     main(args)
-

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#SBATCH --tasks=2
-#SBATCH --nodes=2
+#SBATCH --tasks=1
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtxa5000:4
@@ -9,12 +9,12 @@
 #SBATCH --account=scavenger
 #SBATCH --time=00:30:00
 #SBATCH --mem=120G
-#SBATCH --job-name=sd3-multinode
-#SBATCH --output=/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/logs/sd3-multinode-%j.out
+#SBATCH --job-name=diff-ft
+#SBATCH --output=/fs/cml-projects/yet-another-diffusion/sd3m-cw-expts/logs/sd3-multinode-%j.out
 #SBATCH --wait-all-nodes=1
 #SBATCH --exclusive
 
-#rm -r ./tests_fft
+#rm -r /fs/cml-projects/yet-another-diffusion/sd3m-cw-expts/outputs/tests_fft
 
 NODES_ARRAY=($(scontrol show hostnames $SLURM_JOB_NODELIST))
 HEAD_NODE=${NODES_ARRAY[0]}
@@ -45,7 +45,7 @@ fi
 
 #export dirs
 export MODEL_NAME="stabilityai/stable-diffusion-3-medium-diffusers"
-export OUTPUT_DIR="./tests_fft"
+export OUTPUT_DIR="/fs/cml-projects/yet-another-diffusion/sd3m-cw-expts/outputs/tests_fft"
 #export SCRIPT_DIR="/fs/cml-projects/yet-another-diffusion/sd3m-diffusion/nexus/"
 #Logging, validation
 export HF_TOKEN="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"
@@ -76,60 +76,35 @@ export LAUNCH="
     --nnode $WORLD_SIZE \
     --nproc_per_node 4 \
     "
-# export SCRIPT="train_sd3m_lora.py"
-# export SCRIPT_ARGS=" \
-#   --pretrained_model_name_or_path=$MODEL_NAME \
-#   --output_dir=$OUTPUT_DIR \
-#   --mixed_precision="fp16" \
-#   --resolution=512 \
-#   --train_batch_size=4 \
-#   --gradient_accumulation_steps=1 \
-#   --learning_rate=0.00001 \
-#   --lr_scheduler="cosine_with_restarts" \
-#   --lr_warmup_steps=50 \
-#   --checkpointing_steps=5000 \
-#   --gradient_checkpointing \
-#   --weighting_scheme="logit_normal" \
-#   --seed=42 \
-#   --prior_generation_precision="fp16" \
-#   --use_custom_prompts=True \
-#   --dataloader_num_workers=1 \
-#   --adam_weight_decay=1e-02 \
-#   --max_sequence_length=77 \
-#   --max_train_steps=100000 \
-#   --num_samples=100000 \
-#   --num_validation_images=2 \
-#   --validation_step=5000
-#   "
 
-export SCRIPT="train_sd3m_lora.py"
+export SCRIPT="/fs/cml-projects/yet-another-diffusion/sd3m-cw-expts/scripts/train_sd3m_lora.py"
 export SCRIPT_ARGS=" \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --output_dir=$OUTPUT_DIR \
-  --mixed_precision="fp16" \
+  --mixed_precision="bf16" \
   --resolution=512 \
-  --train_batch_size=4 \
-  --gradient_accumulation_steps=1 \
-  --learning_rate=0.00001 \
+  --train_batch_size=8 \
+  --gradient_accumulation_steps=4 \
+  --learning_rate=2e-6 \
   --lr_scheduler="cosine_with_restarts" \
-  --lr_warmup_steps=5 \
-  --checkpointing_steps=100 \
+  --lr_warmup_steps=100 \
+  --checkpointing_steps=200 \
   --gradient_checkpointing \
   --weighting_scheme="logit_normal" \
   --seed=42 \
   --prior_generation_precision="fp16" \
   --use_custom_prompts=True \
-  --dataloader_num_workers=4 \
+  --dataloader_num_workers=0 \
   --adam_weight_decay=1e-02 \
+  --adam_epsilon=1e-15 \
   --max_sequence_length=77 \
-  --max_train_steps=1000 \
-  --num_samples=1000 \
+  --max_train_steps=1000000 \
+  --num_samples=1000000 \
   --num_validation_images=2 \
-  --validation_step=100
+  --validation_step=200
   "
 
 # --validation_prompt="cat" \
 # launch job
 export CMD="$LAUNCH $SCRIPT $SCRIPT_ARGS"
 srun $CMD
-
