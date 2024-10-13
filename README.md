@@ -1,6 +1,6 @@
 
 # PixelProse PowerUp: SD3-Medium Full Fine-tuning and Context Window Extension
-We've fine-tuned Stable Diffusion 3 Medium  on our PixelProse dataset with the research goal of enhancing text rendering capabilities in large diffusion models.This project extends the text context window length of SD3-M, allowing for longer and more detailed text prompts in image generation. 
+We're fine-tuned Stable Diffusion 3 Medium  on our PixelProse dataset with the research goal of enhancing text rendering capabilities in large diffusion models.This project extends the text context window length of SD3-M, allowing for longer and more detailed text prompts in image generation. 
 Specifically, we're aiming for high GenEval scores across categories pertaining to text rendering, counts, shape, color, and object relations. 
 <img width="975" alt="image" src="https://github.com/user-attachments/assets/27e8ee7a-8e8b-4915-b6f2-9071567e21aa">
 
