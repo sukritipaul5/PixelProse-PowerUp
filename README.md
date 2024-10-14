@@ -68,7 +68,7 @@ python train_sd3m_cw.py \
 
 ### 🧠 How it works
 - Extended Context Window: We use a custom MLP to process extended context beyond the standard 77 tokens.
-- Custom Dataloader: Our `WebDatasetwithCachedLatents` class efficiently handles large-scale data with pre-computed latents.
+- Custom Dataloader: Our `WebDatasetwithCachedLatents` class handles large-scale data with pre-computed latents.
 - Training Loop: The main training loop in `train_sd3m_cw.py` handles gradient accumulation, mixed precision training, and periodic validation.
 - Validation: During training, we generate images using the current model state to track progress visually on wandb.
 
